@@ -17,7 +17,7 @@ iterations=3500, amp=fp16, ckpt_every=500
 torch.compile 关闭
 ```
 
-### high_util（提利用率）
+### high_util（历史候选配置）
 
 ```text
 每卡 num_envs=4096, pi_batch=2048, wm_batch=2048
@@ -25,16 +25,26 @@ policy 宽度 2048-1024-512-256
 torch.compile + compile_more 开启
 ```
 
-### max（当前默认，冲 8 核 + 15 GB）
+### stable_high（已完成正式高利用率运行）
+
+```text
+每卡 num_envs=4096, pi_batch=3072, wm_batch=2048
+policy 宽度 2048-1024-512-256
+FP16，loss scale 256，iterations=3500
+torch.compile 开启，compile_more 关闭
+```
+
+实际训练每卡峰值显存 12589 / 15360 MiB；Kaggle Notebook 的 CPU 检测结果为 4 核。
+
+### max（未执行）
 
 ```text
 每卡 num_envs=8192, pi_batch=3072, wm_batch=2048
 policy 宽度 2048-1024-512-256
-CPU 每 rank 4 线程（8 核）
 torch.compile + compile_more 开启
 ```
 
-全局等价：16384 环境、6144 policy batch、4096 world-model batch。
+max 配置没有作为正式训练结果，不应与已完成的 `stable_high` run 混写。
 
 降档顺序：pi_batch 3072→2048；仍 OOM 则 envs 8192→4096；编译报错则关闭 compile。
 
@@ -50,7 +60,7 @@ torch.compile + compile_more 开启
 bash scripts/train_blinkmimic_t4.sh <log_dir>
 ```
 
-或在 Kaggle 里直接 Run All `kaggle_blinkmimic_t4_ddp.ipynb`。
+或在 Kaggle 里直接 Run All `notebooks/kaggle_blinkmimic_t4_ddp.ipynb`。
 
 ## 4. checkpoint
 
@@ -61,8 +71,9 @@ bash scripts/train_blinkmimic_t4.sh <log_dir>
 
 ## 5. 备份
 
-- Notebook 内置后台线程，把新产生的 checkpoint 和日志上传到 Hugging Face 私有 model 仓库
+- Notebook 内置后台线程，把新产生的 checkpoint 和日志上传到 Hugging Face model 仓库
 - 仓库名：`<hf_user>/proj2-blinkmimic-t4`，首次运行自动创建
+- 可见性由仓库设置决定；公开发布前必须检查数据集和 checkpoint 的再分发许可
 - token 从 Kaggle Secrets 读取，不写进代码
 - Kaggle 输出同时保留一份，作为第二备份
 
@@ -76,5 +87,5 @@ bash scripts/train_blinkmimic_t4.sh <log_dir>
 ## 7. 已知限制
 
 - 仅仿真，不上真机
-- 首跑关闭 torch.compile，吞吐不是最终性能口径
-- 40 段数据需先确认许可证和本地可用性
+- 项目结果仅为仿真验证，不包含真机结果
+- 40 段动作指标已完成；预览视频为 4 段，完整 40 段合辑需单独渲染

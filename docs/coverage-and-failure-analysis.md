@@ -40,7 +40,7 @@
 
 ## 产物状态
 
-指标和确定性轨迹已经生成并上传到 Hugging Face 私有仓库：
+指标和确定性轨迹已经生成并上传到 Hugging Face 模型仓库：
 
 ```text
 runs/run_20261122_083958/eval/eval_final.json
@@ -51,7 +51,14 @@ runs/run_20261122_105913/eval/eval_final.md
 runs/run_20261122_105913/eval/eval_traj.npz
 ```
 
-此前的 `eval_video.mp4` 是 4 段预览视频，不代表 40 段视频覆盖。完整 40 段视频使用 [render_all40_t4.sh](../scripts/render_all40_t4.sh) 生成；在该脚本实际运行并出现上传日志前，不把完整视频标记为已完成。
+此外，旧模型与新模型的完整 40 段合辑均已生成并上传：
+
+```text
+runs/run_20261122_083958/eval/eval_video_all40.mp4  3.80 MB
+runs/run_20261122_105913/eval/eval_video_all40.mp4  3.78 MB
+```
+
+用户提供的上传日志显示两项文件传输和 Hugging Face 校验均达到 100%。4 段预览与完整 40 段合辑是不同产物。
 
 ## 证据来源
 
