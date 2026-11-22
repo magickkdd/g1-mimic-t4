@@ -1,4 +1,4 @@
-# 训练成本报告
+# 训练与评测成本报告
 
 所有数字来自 Kaggle 实跑日志，不引用论文或他人的 4090/H100 数字。
 
@@ -55,7 +55,45 @@ imag_ret 0.903  imag_survival 0.999
 sim_r 0.804  ep_len 487.3  ep_ret 0.792  term 0.0046
 ```
 
-说明：`ep_ret` 是训练期间的回报，不等于 Appendix-F 评测。正式评测由 `kaggle_eval_t4.ipynb` 产出，结果待补。
+说明：`ep_ret` 是训练期间的回报，不等于正式评测指标。该 run 的 40 段评测结果见 [coverage-and-failure-analysis.md](coverage-and-failure-analysis.md)。
+
+## 正式训练高利用率配置（已完成）
+
+来源：`results/blinkmimic_t4_ddp/run_20261122_105913/`，退出码 0。
+
+| 指标 | 实测 |
+|---|---|
+| 数据 | 40 段 LAFAN1 G1 重定向 |
+| 每卡 envs / pi_batch / wm_batch | 4096 / 3072 / 2048 |
+| policy 宽度 | 2048-1024-512-256 |
+| torch.compile | 开启，`compile_more` 关闭 |
+| iterations | 3500 |
+| wall-clock | 4347.3 s = 1.208 h |
+| GPU-hours | 2.415（2 卡） |
+| 每卡显存峰值 | 12589 MiB / 15360 MiB |
+| 吞吐 | 约 0.874 it/s |
+| nonfinite | 0 |
+
+最终训练日志（iteration 3500）：
+
+```text
+wm_loss 0.1037  wm_err8 0.1719  pi_loss -9.417
+imag_ret 0.930  imag_survival 0.9995
+sim_r 0.822  ep_len 344.7  ep_ret 0.625  term 0.00087
+```
+
+## 正式评测成本
+
+两个 checkpoint 在同一次 Kaggle 会话中并行评测，GPU 0 运行旧模型，GPU 1 运行新模型。指标评测使用 40 段动作；轨迹录制随后并行完成。
+
+| 项目 | 旧模型 | 新模型 |
+|---|---:|---:|
+| 指标评测 wall-clock | 758.5 s | 747.6 s |
+| 轨迹录制 wall-clock | 449.6 s | 450.0 s |
+| 指标失败动作 | 0 / 40 | 0 / 40 |
+| 评测设备 | T4 GPU 0 | T4 GPU 1 |
+
+评测产生的 JSON、Markdown、NPZ 轨迹和 4 段预览视频已上传到 HF 私有仓库对应 run 的 `eval/` 目录。完整 40 段视频的 shell 已提供，但未将未执行的渲染耗时计入成本。
 
 ### 资源观测（150 iterations 时）
 
@@ -68,7 +106,7 @@ sim_r 0.804  ep_len 487.3  ep_ret 0.792  term 0.0046
 
 结论：显存和 CPU 都有余量，GPU 利用率是主要瓶颈；仿真不是瓶颈（512→2048 环境吞吐几乎不变）。
 
-## high_util 档（待跑）
+## high_util 档（历史配置，已由正式高利用率 run 覆盖）
 
 | 项 | 值 |
 |---|---|
@@ -80,7 +118,7 @@ sim_r 0.804  ep_len 487.3  ep_ret 0.792  term 0.0046
 | 精度 | fp16，loss scale 256 |
 | torch.compile | 开启 + compile_more |
 
-## max 档（待跑）
+## max 档（未执行）
 
 | 项 | 值 |
 |---|---|

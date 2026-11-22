@@ -5,8 +5,11 @@
 ## 状态
 
 - 2026-11-22：双卡 DDP + fp16 冒烟通过（100 iterations，0.072 GPU-h，2.4 GB/卡）
-- 2026-11-22：40 段 LAFAN1 baseline 完成（3500 iterations，`exit_code=0`，2.21 GPU-h，5.9 GB/卡，最终训练 `ep_ret=0.792`）
-- 下一步：用 `kaggle_eval_t4.ipynb` 出正式评测指标与视频；再跑 max 档
+- 2026-11-22：40 段 LAFAN1 baseline 完成（3500 iterations，`exit_code=0`，2.21 GPU-h，5.9 GB/卡）
+- 2026-11-22：高利用率配置完成（3500 iterations，`exit_code=0`，2.42 GPU-h，12.6 GB/卡）
+- 2026-11-22：两个 checkpoint 完成 40 段正式指标评测，均为 `0/40` 失败；新模型 `norm_return=0.8762`
+- 2026-11-22：两个 checkpoint 的指标 JSON、轨迹 NPZ 和 4 段预览视频已上传 HF 私有仓库
+- 当前收尾：完整 40 段视频需运行 `scripts/render_all40_t4.sh`；不影响已完成的 40 段指标评测
 - 仅仿真验证，未上真机
 
 ## 目录
@@ -19,7 +22,8 @@ third_party/     上游仓库（不提交）
 data/            动作数据（不提交）
 results/         日志与 checkpoint（不提交）
 kaggle_blinkmimic_t4_ddp.ipynb   可直接 Run All 的训练 Notebook
-kaggle_eval_t4.ipynb             训练后指标、轨迹与视频
+kaggle_eval_t4.ipynb             训练后指标、轨迹与预览视频
+docs/coverage-and-failure-analysis.md 40 段覆盖率、指标与失败分析
 ```
 
 ## 环境
@@ -54,7 +58,7 @@ Kaggle 上传 `kaggle_blinkmimic_t4_ddp.ipynb`，添加 `HF_TOKEN` Secret，然�
 
 - `eval_final.md` / `eval_final.json`：归一化回报、失败动作、身体位置/姿态、根漂移、关节误差、脚滑、接触一致率、穿地
 - `eval_traj.npz`：40 段动作的确定性 rollout
-- `eval_video.mp4`：走、跑、转身、舞蹈四段视频
+- `eval_video.mp4`：走、跑、转身、舞蹈四段预览视频
 - 以上文件自动上传到 Hugging Face 私有仓库 `runs/run_<id>/eval/`
 
 命令行：
@@ -62,6 +66,8 @@ Kaggle 上传 `kaggle_blinkmimic_t4_ddp.ipynb`，添加 `HF_TOKEN` Secret，然�
 ```bash
 bash scripts/train_blinkmimic_t4.sh <log_dir>
 ```
+
+完整 40 段指标、覆盖率和失败分析见 [docs/coverage-and-failure-analysis.md](docs/coverage-and-failure-analysis.md)。
 
 ## 实测结果（冒烟）
 
