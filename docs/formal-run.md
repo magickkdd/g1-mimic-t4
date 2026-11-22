@@ -22,11 +22,21 @@ torch.compile 关闭
 ```text
 每卡 num_envs=4096, pi_batch=2048, wm_batch=2048
 policy 宽度 2048-1024-512-256
-iterations=3500, amp=fp16, ckpt_every=500
 torch.compile + compile_more 开启
 ```
 
-全局等价：8192 环境、4096 policy batch、4096 world-model batch。
+### max（当前默认，冲 8 核 + 15 GB）
+
+```text
+每卡 num_envs=8192, pi_batch=3072, wm_batch=2048
+policy 宽度 2048-1024-512-256
+CPU 每 rank 4 线程（8 核）
+torch.compile + compile_more 开启
+```
+
+全局等价：16384 环境、6144 policy batch、4096 world-model batch。
+
+降档顺序：pi_batch 3072→2048；仍 OOM 则 envs 8192→4096；编译报错则关闭 compile。
 
 ### DDP 通信优化
 

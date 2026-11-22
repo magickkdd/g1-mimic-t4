@@ -15,7 +15,13 @@ if ! grep -q "fp16_loss_scale" "${REPO_DIR}/src/blinkmimic/train.py"; then
 fi
 
 cd "${REPO_DIR}"
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
+CORES=$(nproc 2>/dev/null || echo 2)
+THREADS=${CPU_THREADS_PER_RANK:-$((CORES / ${WORLD_SIZE:-2}))}
+if [ "${THREADS}" -lt 1 ]; then THREADS=1; fi
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${THREADS}}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${THREADS}}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-${THREADS}}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-${THREADS}}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
@@ -27,9 +33,9 @@ fi
 T4_FLAGS=(
   --amp fp16 --fp16_loss_scale "${FP16_LOSS_SCALE:-256}"
   --motion_dir data/lafan1_g1
-  --num_envs "${PER_RANK_ENVS:-4096}"
+  --num_envs "${PER_RANK_ENVS:-8192}"
   --iterations "${ITERATIONS:-3500}"
-  --pi_batch "${PER_RANK_PI_BATCH:-2048}"
+  --pi_batch "${PER_RANK_PI_BATCH:-3072}"
   --wm_batch "${PER_RANK_WM_BATCH:-2048}"
   --wm_batches 5
   --horizon 32
