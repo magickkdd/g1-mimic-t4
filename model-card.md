@@ -41,7 +41,7 @@ Both checkpoints were evaluated with deterministic rollouts on 40 LAFAN1 G1-reta
 | Contact agreement ↑ | 75.69% | 77.13% |
 | Penetration proxy (mm) ↓ | 0.0612 | 0.0530 |
 
-The `eval/` folders contain the JSON/Markdown metrics, recorded rollout archives, logs, and four-motion preview videos. Four-motion previews should not be interpreted as 40-motion aggregate videos.
+The `eval/` folders contain JSON/Markdown metrics, recorded rollout archives, logs, and four-motion previews. The earlier fixed-duration aggregate video may truncate clips and is not the complete-action deliverable. The repository includes a corrected renderer that creates one MP4 per motion with duration derived from `clip_len`; rerun it to produce and upload the complete per-motion videos.
 
 ## Intended use and limitations
 

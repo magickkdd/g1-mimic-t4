@@ -40,7 +40,7 @@ This model repository is public and browsable anonymously. It contains both `las
 | `20261122_083958` | `runs/run_20261122_083958/last.pt` | [`eval/`](https://huggingface.co/A2bao/proj2-blinkmimic-t4/tree/main/runs/run_20261122_083958/eval) |
 | `20261122_105913` | `runs/run_20261122_105913/last.pt` | [`eval/`](https://huggingface.co/A2bao/proj2-blinkmimic-t4/tree/main/runs/run_20261122_105913/eval) |
 
-Each evaluation directory contains metric JSON/Markdown, the deterministic rollout archive, logs, a four-motion preview video, and a full 40-motion aggregate video (`eval_video_all40.mp4`). The two aggregate videos were uploaded successfully; the user-provided upload logs show 100% transfer and validation for both files (3.80 MB and 3.78 MB).
+Each evaluation directory contains metric JSON/Markdown, the deterministic rollout archive, logs, and a four-motion preview. An earlier aggregate video used fixed three-second segments and could cut motions short; do not treat that file as a complete-action video. A corrected renderer is provided to create one full-length MP4 per motion under `eval/videos/`, derive each duration from `clip_len`, and validate outputs with `ffprobe`. These corrected per-motion videos must be regenerated and uploaded before claiming that complete individual videos are available.
 
 ## Method and hardware
 
@@ -61,7 +61,7 @@ This is a reproduction/adaptation of the BlinkMimic stack for the stated hardwar
 3. Run the training notebook; it pins the upstream commit, applies the T4 DDP/FP16 patch, and backs up checkpoints and logs.
 4. Run [`notebooks/kaggle_eval_t4_max_compare.ipynb`](notebooks/kaggle_eval_t4_max_compare.ipynb) to compute the 40-motion metrics, save trajectories, render previews, and upload run artifacts.
 
-The shell entry points are [`scripts/train_blinkmimic_t4.sh`](scripts/train_blinkmimic_t4.sh) and [`scripts/render_all40_t4.sh`](scripts/render_all40_t4.sh). The latter renders all 40 clips from an existing trajectory archive without rerunning policy evaluation.
+The shell entry points are [`scripts/train_blinkmimic_t4.sh`](scripts/train_blinkmimic_t4.sh) and [`scripts/render_all40_t4.sh`](scripts/render_all40_t4.sh). The latter renders one full-length MP4 per motion from existing trajectory archives and uploads the videos and manifest without rerunning policy evaluation. The current Kaggle runner is [`notebooks/kaggle_render_all40.ipynb`](notebooks/kaggle_render_all40.ipynb).
 
 ## Repository layout
 
