@@ -8,19 +8,31 @@
 
 ## 2. 正式配置
 
+### baseline（已验证）
+
 ```text
-每卡 num_envs=2048
-每卡 pi_batch=1024
-每卡 wm_batch=1024
-horizon=32, wm_batches=5
-iterations=3500
-amp=fp16, fp16_loss_scale=256
-ckpt_every=500, ckpt_minutes=10
-max_hours=8
+每卡 num_envs=2048, pi_batch=1024, wm_batch=1024
+policy 宽度 1024-512-256
+iterations=3500, amp=fp16, ckpt_every=500
 torch.compile 关闭
 ```
 
-全局等价：4096 环境、2048 policy batch、2048 world-model batch。
+### high_util（提利用率）
+
+```text
+每卡 num_envs=4096, pi_batch=2048, wm_batch=2048
+policy 宽度 2048-1024-512-256
+iterations=3500, amp=fp16, ckpt_every=500
+torch.compile + compile_more 开启
+```
+
+全局等价：8192 环境、4096 policy batch、4096 world-model batch。
+
+### DDP 通信优化
+
+- 梯度按模块打平成一次 all-reduce，不再逐 tensor 调用
+- norm/EMA buffer 按 dtype 打平广播
+- stop flag 每 10 个 iteration 检查一次，减少 host sync
 
 ## 3. 启动
 

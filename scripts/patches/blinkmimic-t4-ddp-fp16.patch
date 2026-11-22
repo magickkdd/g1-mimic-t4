@@ -1,5 +1,5 @@
 diff --git a/src/blinkmimic/train.py b/src/blinkmimic/train.py
-index 9611277..341d364 100644
+index 9611277..6dc77f5 100644
 --- a/src/blinkmimic/train.py
 +++ b/src/blinkmimic/train.py
 @@ -128,12 +128,26 @@ parser.add_argument("--motion_dir", type=str, default=None, help="defaults to th
@@ -78,7 +78,7 @@ index 9611277..341d364 100644
  assert not args.eprobe_async or args.eprobe_share > 0, "--eprobe_async needs --eprobe_share"
  assert not args.lr_decay_by or args.lr_decay_ret > 0, "--lr_decay_by needs --lr_decay_ret"
  fused = {"fused": True} if args.fused_adam else {}
-@@ -355,6 +392,40 @@ def _mirror_windows(w: dict, n: int) -> dict:
+@@ -355,6 +392,51 @@ def _mirror_windows(w: dict, n: int) -> dict:
      return out
  
  
@@ -86,12 +86,16 @@ index 9611277..341d364 100644
 +
 +
 +def allreduce_grads(module):
-+    """Average gradients across ranks (NCCL), so every rank applies the same optimizer step."""
++    """Average gradients across ranks as one flat buffer per module (one NCCL call, not one per tensor)."""
 +    if not DIST:
 +        return
-+    for p in module.parameters():
-+        if p.grad is not None:
-+            torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.AVG)
++    grads = [p.grad for p in module.parameters() if p.grad is not None]
++    if not grads:
++        return
++    flat = torch._utils._flatten_dense_tensors([g.contiguous() for g in grads])
++    torch.distributed.all_reduce(flat, op=torch.distributed.ReduceOp.AVG)
++    for g, new in zip(grads, torch._utils._unflatten_dense_tensors(flat, [g.contiguous() for g in grads])):
++        g.copy_(new)
 +
 +
 +def backward_scaled(loss, module):
@@ -105,21 +109,28 @@ index 9611277..341d364 100644
 +
 +
 +def sync_norm_buffers():
-+    """Running normalizers and EMA buffers must agree across ranks; the tensors are small."""
++    """Running normalizers and EMA buffers must agree across ranks; pack each dtype into one NCCL call."""
 +    if not DIST:
 +        return
 +    for module in (wm, pi, critic, pi_avg):
 +        if module is None:
 +            continue
-+        for b in module.buffers():
-+            if b.device.type == "cuda":  # NCCL cannot broadcast CPU buffers (AveragedModel.n_averaged)
-+                torch.distributed.broadcast(b.data, 0)
++        bufs = [b for b in module.buffers() if b.device.type == "cuda"]  # AveragedModel.n_averaged stays on CPU
++        for dtype in sorted({b.dtype for b in bufs}, key=str):
++            group = [b for b in bufs if b.dtype == dtype]
++            flat = torch.cat([b.reshape(-1) for b in group])
++            torch.distributed.broadcast(flat, 0)
++            offset = 0
++            for b in group:
++                n = b.numel()
++                b.copy_(flat[offset:offset + n].view_as(b))
++                offset += n
 +
 +
  def wm_update():
      w = buffer.sample_windows(args.wm_batch, args.wm_window)
      if mirror is not None:
-@@ -362,9 +433,10 @@ def wm_update():
+@@ -362,9 +444,10 @@ def wm_update():
      S_hat = wm_rollout(w["s"], w["a"], w["a_prev"], w["xi"])
      loss, e_last = wm_err(S_hat, w["s1"], w["mask"])
      opt_wm.zero_grad(set_to_none=True)
@@ -133,7 +144,7 @@ index 9611277..341d364 100644
      m = w["mask"][:, -1]
      return loss.detach() / args.wm_window, (e_last.detach() * m).sum() / m.sum().clamp(min=1)
  
-@@ -469,7 +541,7 @@ def policy_update():
+@@ -469,7 +552,7 @@ def policy_update():
      rews, dones = r.detach(), d.detach()
      loss = -J.mean()
      opt_pi.zero_grad(set_to_none=True)
@@ -142,7 +153,7 @@ index 9611277..341d364 100644
      gn = nn.utils.clip_grad_norm_(pi.parameters(), 1.0)
      if args.pi_clip_value > 0:
          nn.utils.clip_grad_value_(pi.parameters(), args.pi_clip_value)
-@@ -521,9 +593,10 @@ def policy_update():
+@@ -521,9 +604,10 @@ def policy_update():
              idx = perm[i * mb : (i + 1) * mb]
              v_loss = (critic_loss_c if args.fused_adam else _critic_loss)(Xf[idx], Yf[idx])
              opt_v.zero_grad(set_to_none=True)
@@ -156,7 +167,7 @@ index 9611277..341d364 100644
      return loss.detach(), v_loss.detach(), (r_sum / HZ / 0.1).mean(), gn.detach(), c.mean().detach()
  
  
-@@ -625,7 +698,7 @@ def collect(n_steps: int, stats: dict):
+@@ -625,7 +709,7 @@ def collect(n_steps: int, stats: dict):
      if args.collect_graph:
          for _ in range(n_steps):
              core = collect_graphed_step()
@@ -165,7 +176,7 @@ index 9611277..341d364 100644
              stats["r"].append(core["r_mean"].clone())
              if args.reset_masked:  # every step appends; steps without an ended episode carry NaN means (skipped in the log)
                  for k_s, k_c in (("ep_len", "ep_len"), ("ep_ret", "ep_ret"), ("term", "term_sum"), ("done", "done_sum")):
-@@ -654,7 +727,7 @@ def collect(n_steps: int, stats: dict):
+@@ -654,7 +738,7 @@ def collect(n_steps: int, stats: dict):
          wm.in_norm.update(wm_in)
          wm.out_norm.update(wm_out)
          wm.inc_norm.update(wm_inc)
@@ -174,7 +185,7 @@ index 9611277..341d364 100644
          stats["r"].append(out["r"].mean() / 0.1)
          if "ep_len" in out:
              stats["ep_len"].append(out["ep_len"].mean())
-@@ -864,12 +937,12 @@ def eprobe_finish(it, lead, t0, fail_f):
+@@ -864,12 +948,12 @@ def eprobe_finish(it, lead, t0, fail_f):
  stats = {"r": [], "ep_len": [], "ep_ret": [], "term": [], "done": []}
  collect(args.warmup_steps, stats)  # the replay buffer is not checkpointed, so a resumed run refills it too
  log_path = os.path.join(args.log_dir, "train_log.csv")
@@ -190,7 +201,7 @@ index 9611277..341d364 100644
  # --ckpt_light: one background writer; a failed write is re-raised in the training loop (or at the end), at most 2 queued
  CKPT_POOL, CKPT_PENDING = (ThreadPoolExecutor(max_workers=1) if args.ckpt_light else None), []
  
-@@ -924,19 +997,22 @@ for it in range(start_it, args.iterations):
+@@ -924,19 +1008,22 @@ for it in range(start_it, args.iterations):
      if args.eprobe_async:
          eprobe_async_tick(launch=True)
      collect(n, stats)
@@ -215,7 +226,7 @@ index 9611277..341d364 100644
      if (it + 1) % args.log_every == 0:
          mean = lambda x: float(sum(float(v) for v in x) / max(len(x), 1))  # noqa: E731
          mean_nn = lambda x: mean([v for v in (float(v) for v in x) if v == v])  # noqa: E731  (--reset_masked: NaN = no end)
-@@ -946,16 +1022,23 @@ for it in range(start_it, args.iterations):
+@@ -946,16 +1033,23 @@ for it in range(start_it, args.iterations):
          term_frac = float(sum(float(v) for v in stats["term"]) / max(sum(float(v) for v in stats["done"]), 1))
          row = [it + 1, wall_h, sim_steps, mean(agg["wm"]), mean(agg["wm8"]), mean(agg["pi"]), mean(agg["v"]), mean(agg["ir"]),
                 mean(agg["gn"]), mean(agg["surv"]), mean(stats["r"]), mean_nn(stats["ep_len"]), mean_nn(stats["ep_ret"]), term_frac, ips, lr]  # fmt: skip
@@ -244,7 +255,7 @@ index 9611277..341d364 100644
          stats = {k: [] for k in stats}
          agg = {k: [] for k in agg}
      wall = time.time() - t_start
-@@ -964,7 +1047,7 @@ for it in range(start_it, args.iterations):
+@@ -964,7 +1058,7 @@ for it in range(start_it, args.iterations):
      if timed:
          next_ckpt_s += args.ckpt_minutes * 60
      final_ck = it + 1 == args.iterations or out_of_time
@@ -253,7 +264,7 @@ index 9611277..341d364 100644
          sd = pi_avg.module.state_dict() if pi_avg is not None else pi.state_dict()
          small = {"pi": {k: v.detach().to("cpu", copy=True) for k, v in sd.items()}, "iteration": it + 1,
                   "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
-@@ -972,7 +1055,7 @@ for it in range(start_it, args.iterations):
+@@ -972,7 +1066,7 @@ for it in range(start_it, args.iterations):
          path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
          ckpt_wait()
          CKPT_PENDING.append(CKPT_POOL.submit(_save_atomic, small, path))
@@ -262,19 +273,21 @@ index 9611277..341d364 100644
          ck = {"wm": wm.state_dict(), "pi": pi_avg.module.state_dict() if pi_avg is not None else pi.state_dict(), "pi_live": pi.state_dict(), "critic": critic.state_dict(), "opt_wm": opt_wm.state_dict(),
                "opt_pi": opt_pi.state_dict(), "opt_v": opt_v.state_dict(), "iteration": it + 1,
                "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
-@@ -989,9 +1072,15 @@ for it in range(start_it, args.iterations):
+@@ -989,9 +1083,16 @@ for it in range(start_it, args.iterations):
          path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
          torch.save(small, path + ".tmp")
          os.replace(path + ".tmp", path)
 -    if out_of_time:
 -        print(f"time budget of {args.max_hours} h reached at it {it + 1}", flush=True)
-+    stop_flag = torch.tensor([1 if out_of_time else 0], device=dev, dtype=torch.int32)
-+    if DIST:
-+        torch.distributed.all_reduce(stop_flag, op=torch.distributed.ReduceOp.MAX)
-+    if int(stop_flag.item()):
-+        if RANK == 0:
-+            print(f"time budget of {args.max_hours} h reached at it {it + 1}", flush=True)
-         break
+-        break
++    if it % 10 == 0:  # one host sync/collective every 10 iterations is enough for the stop flag
++        stop_flag = torch.tensor([1 if out_of_time else 0], device=dev, dtype=torch.int32)
++        if DIST:
++            torch.distributed.all_reduce(stop_flag, op=torch.distributed.ReduceOp.MAX)
++        if int(stop_flag.item()):
++            if RANK == 0:
++                print(f"time budget of {args.max_hours} h reached at it {it + 1}", flush=True)
++            break
  if CKPT_POOL is not None:  # every background checkpoint written (a failed write raises here: non-zero exit)
      ckpt_wait(drain=True)
      CKPT_POOL.shutdown()
