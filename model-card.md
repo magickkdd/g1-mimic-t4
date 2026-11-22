@@ -56,6 +56,6 @@ The training/evaluation motions are from LAFAN1 and a Unitree G1-retargeted deri
 
 ## Sources
 
-- Code: [magickkdd/proj-2](https://github.com/magickkdd/proj-2)
+- Code: [magickkdd/g1-mimic-t4](https://github.com/magickkdd/g1-mimic-t4)
 - Upstream method implementation: [fuyichen0725/blinkmimic](https://github.com/fuyichen0725/blinkmimic), commit `d264658d6c9ce61fb52f9f0f8985a369f3ccc409`
-- Motion data manifest: [docs/data-manifest.md](https://github.com/magickkdd/proj-2/blob/main/docs/data-manifest.md)
+- Motion data manifest: [docs/data-manifest.md](https://github.com/magickkdd/g1-mimic-t4/blob/main/docs/data-manifest.md)
