@@ -1,0 +1,12 @@
+third_party/
+data/
+results/
+media/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.pt
+*.tmp
+.env
+*token*

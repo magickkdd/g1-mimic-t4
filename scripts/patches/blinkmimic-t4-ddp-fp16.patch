@@ -1,0 +1,282 @@
+diff --git a/src/blinkmimic/train.py b/src/blinkmimic/train.py
+index 9611277..341d364 100644
+--- a/src/blinkmimic/train.py
++++ b/src/blinkmimic/train.py
+@@ -128,12 +128,26 @@ parser.add_argument("--motion_dir", type=str, default=None, help="defaults to th
+ parser.add_argument("--log_dir", type=str, default=os.path.join(REPO, "logs", "run"))
+ parser.add_argument("--seed", type=int, default=0)
+ parser.add_argument("--resume", type=str, default=None)
+-parser.add_argument("--amp", type=str, default="bf16", choices=["none", "bf16"], help="autocast dtype for MLP matmuls")
++parser.add_argument("--amp", type=str, default="bf16", choices=["none", "bf16", "fp16"], help="autocast dtype for MLP matmuls (T4: fp16 or none)")
++parser.add_argument("--fp16_loss_scale", type=float, default=256.0, help="static loss scale for --amp fp16")
+ args = parser.parse_args()
+ 
++# ---- distributed (torchrun): one process per GPU; each process sees only its local GPU ----
++WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
++RANK = int(os.environ.get("RANK", "0"))
++LOCAL_RANK = int(os.environ.get("LOCAL_RANK", "0"))
++DIST = WORLD_SIZE > 1
++if DIST:
++    # Warp always picks the first visible GPU, so mask the others before any CUDA context exists.
++    os.environ["CUDA_VISIBLE_DEVICES"] = str(LOCAL_RANK)
++
+ import torch
+ import torch.nn as nn
+ 
++if DIST:
++    torch.cuda.set_device(0)
++    torch.distributed.init_process_group("nccl", device_id=torch.device("cuda", 0))
++
+ from blinkmimic.buffer import ReplayBuffer
+ from blinkmimic.dr import XiLayout
+ from blinkmimic.env import PHYSICS_DT, TrackingSim, make_sim
+@@ -152,10 +166,13 @@ from blinkmimic.sensing import ObsPipeline
+ torch.backends.cuda.matmul.allow_tf32 = True
+ torch.backends.cudnn.allow_tf32 = True
+ torch.manual_seed(args.seed)
+-networks.AMP_DTYPE = torch.bfloat16 if args.amp == "bf16" else None
++networks.AMP_DTYPE = {"none": None, "bf16": torch.bfloat16, "fp16": torch.float16}[args.amp]
+ dev = "cuda:0"
+-os.makedirs(args.log_dir, exist_ok=True)
+-json.dump(vars(args), open(os.path.join(args.log_dir, "args.json"), "w"), indent=2)
++if RANK == 0:
++    os.makedirs(args.log_dir, exist_ok=True)
++    json.dump(vars(args), open(os.path.join(args.log_dir, "args.json"), "w"), indent=2)
++if DIST:
++    torch.distributed.barrier()
+ 
+ robot = get_robot(args.robot)
+ J = robot.num_joints
+@@ -178,10 +195,30 @@ wm = WorldModel(J, layout.dim, use_prev_action=robot.has_action_delay, hidden=wi
+ pi = Policy(mdp.obs_dim, GOAL_DIM, J, hist=Hh, enc_hidden=widths(args.enc_hidden), dec_hidden=widths(args.dec_hidden),
+             **policy_kwargs(vars(args), robot)).to(dev)
+ critic = Critic(CRITIC_IN).to(dev)
++
++
++def _broadcast_module(module):
++    if not DIST:
++        return
++    for p in module.parameters():
++        torch.distributed.broadcast(p.data, 0)
++    for b in module.buffers():
++        if b.device.type == "cuda":  # e.g. AveragedModel keeps n_averaged on the CPU
++            torch.distributed.broadcast(b.data, 0)
++
++
++if DIST:
++    for module in (wm, pi, critic):
++        _broadcast_module(module)
++    # identical initial weights, different data/simulator streams per rank
++    torch.manual_seed(args.seed + 1000 * RANK)
++
+ GRAPH = args.cuda_graph
+ if GRAPH:
+     assert args.no_sync and args.fused_adam, "--cuda_graph needs --no_sync --fused_adam"
+     assert not pipe.stateful, "--cuda_graph: not with stateful sensing"
++assert not (DIST and GRAPH), "distributed + --cuda_graph is not supported (all-reduce must sit between backward and step)"
++assert not (DIST and args.eprobe_share > 0), "distributed + --eprobe_share is not supported yet"
+ assert not args.eprobe_async or args.eprobe_share > 0, "--eprobe_async needs --eprobe_share"
+ assert not args.lr_decay_by or args.lr_decay_ret > 0, "--lr_decay_by needs --lr_decay_ret"
+ fused = {"fused": True} if args.fused_adam else {}
+@@ -355,6 +392,40 @@ def _mirror_windows(w: dict, n: int) -> dict:
+     return out
+ 
+ 
++LOSS_SCALE = args.fp16_loss_scale if args.amp == "fp16" else 1.0
++
++
++def allreduce_grads(module):
++    """Average gradients across ranks (NCCL), so every rank applies the same optimizer step."""
++    if not DIST:
++        return
++    for p in module.parameters():
++        if p.grad is not None:
++            torch.distributed.all_reduce(p.grad, op=torch.distributed.ReduceOp.AVG)
++
++
++def backward_scaled(loss, module):
++    """Backward with the static fp16 loss scale, average gradients across ranks, then unscale in place."""
++    (loss * LOSS_SCALE).backward()
++    allreduce_grads(module)
++    if LOSS_SCALE != 1.0:
++        for p in module.parameters():
++            if p.grad is not None:
++                p.grad.div_(LOSS_SCALE)
++
++
++def sync_norm_buffers():
++    """Running normalizers and EMA buffers must agree across ranks; the tensors are small."""
++    if not DIST:
++        return
++    for module in (wm, pi, critic, pi_avg):
++        if module is None:
++            continue
++        for b in module.buffers():
++            if b.device.type == "cuda":  # NCCL cannot broadcast CPU buffers (AveragedModel.n_averaged)
++                torch.distributed.broadcast(b.data, 0)
++
++
+ def wm_update():
+     w = buffer.sample_windows(args.wm_batch, args.wm_window)
+     if mirror is not None:
+@@ -362,9 +433,10 @@ def wm_update():
+     S_hat = wm_rollout(w["s"], w["a"], w["a_prev"], w["xi"])
+     loss, e_last = wm_err(S_hat, w["s1"], w["mask"])
+     opt_wm.zero_grad(set_to_none=True)
+-    loss.backward()
+-    nn.utils.clip_grad_norm_(wm.parameters(), 1.0)
+-    opt_wm.step()
++    backward_scaled(loss, wm)
++    gn_wm = nn.utils.clip_grad_norm_(wm.parameters(), 1.0)
++    if torch.isfinite(gn_wm):
++        opt_wm.step()
+     m = w["mask"][:, -1]
+     return loss.detach() / args.wm_window, (e_last.detach() * m).sum() / m.sum().clamp(min=1)
+ 
+@@ -469,7 +541,7 @@ def policy_update():
+     rews, dones = r.detach(), d.detach()
+     loss = -J.mean()
+     opt_pi.zero_grad(set_to_none=True)
+-    loss.backward()
++    backward_scaled(loss, pi)
+     gn = nn.utils.clip_grad_norm_(pi.parameters(), 1.0)
+     if args.pi_clip_value > 0:
+         nn.utils.clip_grad_value_(pi.parameters(), args.pi_clip_value)
+@@ -521,9 +593,10 @@ def policy_update():
+             idx = perm[i * mb : (i + 1) * mb]
+             v_loss = (critic_loss_c if args.fused_adam else _critic_loss)(Xf[idx], Yf[idx])
+             opt_v.zero_grad(set_to_none=True)
+-            v_loss.backward()
+-            nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
+-            opt_v.step()
++            backward_scaled(v_loss, critic)
++            gn_v = nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
++            if torch.isfinite(gn_v):
++                opt_v.step()
+     return loss.detach(), v_loss.detach(), (r_sum / HZ / 0.1).mean(), gn.detach(), c.mean().detach()
+ 
+ 
+@@ -625,7 +698,7 @@ def collect(n_steps: int, stats: dict):
+     if args.collect_graph:
+         for _ in range(n_steps):
+             core = collect_graphed_step()
+-            sim_steps += args.num_envs
++            sim_steps += args.num_envs * WORLD_SIZE
+             stats["r"].append(core["r_mean"].clone())
+             if args.reset_masked:  # every step appends; steps without an ended episode carry NaN means (skipped in the log)
+                 for k_s, k_c in (("ep_len", "ep_len"), ("ep_ret", "ep_ret"), ("term", "term_sum"), ("done", "done_sum")):
+@@ -654,7 +727,7 @@ def collect(n_steps: int, stats: dict):
+         wm.in_norm.update(wm_in)
+         wm.out_norm.update(wm_out)
+         wm.inc_norm.update(wm_inc)
+-        sim_steps += args.num_envs
++        sim_steps += args.num_envs * WORLD_SIZE
+         stats["r"].append(out["r"].mean() / 0.1)
+         if "ep_len" in out:
+             stats["ep_len"].append(out["ep_len"].mean())
+@@ -864,12 +937,12 @@ def eprobe_finish(it, lead, t0, fail_f):
+ stats = {"r": [], "ep_len": [], "ep_ret": [], "term": [], "done": []}
+ collect(args.warmup_steps, stats)  # the replay buffer is not checkpointed, so a resumed run refills it too
+ log_path = os.path.join(args.log_dir, "train_log.csv")
+-log_f = open(log_path, "a")
+-if start_it == 0:
++log_f = open(log_path, "a") if RANK == 0 else open(os.devnull, "w")
++if start_it == 0 and RANK == 0:
+     log_f.write("iteration,wall_h,sim_steps,wm_loss,wm_err8,pi_loss,v_loss,imag_rew,pi_gradnorm,imag_survival,sim_rew,ep_len,ep_ret_norm,term_frac,it_per_s,lr"
+                 ",pi_lr,pi_mult,nonfinite\n")  # fmt: skip
+     log_f.flush()
+-LOG_EXTRA = "pi_lr" in open(log_path).readline()  # lr = base LR; pi_lr = policy LR (x pi_mult)
++LOG_EXTRA = ("pi_lr" in open(log_path).readline()) if RANK == 0 else False  # lr = base LR; pi_lr = policy LR (x pi_mult)
+ # --ckpt_light: one background writer; a failed write is re-raised in the training loop (or at the end), at most 2 queued
+ CKPT_POOL, CKPT_PENDING = (ThreadPoolExecutor(max_workers=1) if args.ckpt_light else None), []
+ 
+@@ -924,19 +997,22 @@ for it in range(start_it, args.iterations):
+     if args.eprobe_async:
+         eprobe_async_tick(launch=True)
+     collect(n, stats)
++    sync_norm_buffers()
+     for _ in range(args.wm_batches):
+         l, e8 = wm_update_g()
+     agg["wm"].append(l), agg["wm8"].append(e8)
+     if POLICY_START is None and it + 1 >= args.wm_only_iters:
+         POLICY_START = args.wm_only_iters
+-        print(f"policy updates start at iteration {POLICY_START}", flush=True)
+-        open(os.path.join(args.log_dir, "policy_start.txt"), "w").write(f"{POLICY_START}\n")
++        if RANK == 0:
++            print(f"policy updates start at iteration {POLICY_START}", flush=True)
++            open(os.path.join(args.log_dir, "policy_start.txt"), "w").write(f"{POLICY_START}\n")
+     if POLICY_START is not None and it >= POLICY_START:
+         n_avg0 = int(pi_avg.n_averaged) if pi_avg is not None else 0
+         pl, vl, ir, gn, surv = policy_update_g()
+         if GRAPH and pi_avg is not None and int(pi_avg.n_averaged) == n_avg0:
+             pi_avg.n_averaged += 1  # ema_update (and a graph replay) does not advance the host-side counter
+         agg["pi"].append(pl), agg["v"].append(vl), agg["ir"].append(ir), agg["gn"].append(gn), agg["surv"].append(surv)
++    sync_norm_buffers()
+     if (it + 1) % args.log_every == 0:
+         mean = lambda x: float(sum(float(v) for v in x) / max(len(x), 1))  # noqa: E731
+         mean_nn = lambda x: mean([v for v in (float(v) for v in x) if v == v])  # noqa: E731  (--reset_masked: NaN = no end)
+@@ -946,16 +1022,23 @@ for it in range(start_it, args.iterations):
+         term_frac = float(sum(float(v) for v in stats["term"]) / max(sum(float(v) for v in stats["done"]), 1))
+         row = [it + 1, wall_h, sim_steps, mean(agg["wm"]), mean(agg["wm8"]), mean(agg["pi"]), mean(agg["v"]), mean(agg["ir"]),
+                mean(agg["gn"]), mean(agg["surv"]), mean(stats["r"]), mean_nn(stats["ep_len"]), mean_nn(stats["ep_ret"]), term_frac, ips, lr]  # fmt: skip
++        if DIST:  # the LR trigger must fire on the same iteration in every rank
++            ret = torch.tensor(row[12], device=dev)
++            torch.distributed.all_reduce(ret, op=torch.distributed.ReduceOp.AVG)
++            row[12] = float(ret)
+         extra = [lr * pi_mult, float(pi_mult), int(NONFINITE)] if LOG_EXTRA else []
+-        log_f.write(",".join(f"{x:.6g}" if isinstance(x, float) else str(x) for x in row + extra) + "\n")
++        if RANK == 0:
++            log_f.write(",".join(f"{x:.6g}" if isinstance(x, float) else str(x) for x in row + extra) + "\n")
+         deadline = args.lr_decay_by > 0 and it + 1 >= args.lr_decay_by
+         if args.lr_decay_ret > 0 and DECAY_AT[0] is None and (row[12] >= args.lr_decay_ret or deadline):
+             DECAY_AT[0] = it + 1
+             why = f"training return {row[12]:.3f} >= {args.lr_decay_ret}" if row[12] >= args.lr_decay_ret else f"deadline --lr_decay_by {args.lr_decay_by}"
+-            print(f"--lr_decay_ret: {why} at it {it + 1}: policy LR x{args.pi_lr_mult} -> x1 over {args.lr_decay_len} its", flush=True)
+-        log_f.flush()
+-        print(f"it {it + 1} | {wall_h:.3f} h | wm {row[3]:.4f} e8 {row[4]:.4f} | pi {row[5]:.3f} v {row[6]:.4f} imag_r {row[7]:.3f} surv {row[9]:.3f} "
+-              f"| sim_r {row[10]:.3f} ep_len {row[11]:.1f} ep_ret {row[12]:.3f} term {term_frac:.2f} | {ips:.2f} it/s", flush=True)  # fmt: skip
++            if RANK == 0:
++                print(f"--lr_decay_ret: {why} at it {it + 1}: policy LR x{args.pi_lr_mult} -> x1 over {args.lr_decay_len} its", flush=True)
++        if RANK == 0:
++            log_f.flush()
++            print(f"it {it + 1} | {wall_h:.3f} h | wm {row[3]:.4f} e8 {row[4]:.4f} | pi {row[5]:.3f} v {row[6]:.4f} imag_r {row[7]:.3f} surv {row[9]:.3f} "
++                  f"| sim_r {row[10]:.3f} ep_len {row[11]:.1f} ep_ret {row[12]:.3f} term {term_frac:.2f} | {ips:.2f} it/s", flush=True)  # fmt: skip
+         stats = {k: [] for k in stats}
+         agg = {k: [] for k in agg}
+     wall = time.time() - t_start
+@@ -964,7 +1047,7 @@ for it in range(start_it, args.iterations):
+     if timed:
+         next_ckpt_s += args.ckpt_minutes * 60
+     final_ck = it + 1 == args.iterations or out_of_time
+-    if args.ckpt_light and not final_ck and ((it + 1) % args.ckpt_every == 0 or timed):
++    if RANK == 0 and args.ckpt_light and not final_ck and ((it + 1) % args.ckpt_every == 0 or timed):
+         sd = pi_avg.module.state_dict() if pi_avg is not None else pi.state_dict()
+         small = {"pi": {k: v.detach().to("cpu", copy=True) for k, v in sd.items()}, "iteration": it + 1,
+                  "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
+@@ -972,7 +1055,7 @@ for it in range(start_it, args.iterations):
+         path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
+         ckpt_wait()
+         CKPT_PENDING.append(CKPT_POOL.submit(_save_atomic, small, path))
+-    elif (it + 1) % args.ckpt_every == 0 or it + 1 == args.iterations or timed or out_of_time:
++    elif RANK == 0 and ((it + 1) % args.ckpt_every == 0 or it + 1 == args.iterations or timed or out_of_time):
+         ck = {"wm": wm.state_dict(), "pi": pi_avg.module.state_dict() if pi_avg is not None else pi.state_dict(), "pi_live": pi.state_dict(), "critic": critic.state_dict(), "opt_wm": opt_wm.state_dict(),
+               "opt_pi": opt_pi.state_dict(), "opt_v": opt_v.state_dict(), "iteration": it + 1,
+               "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
+@@ -989,9 +1072,15 @@ for it in range(start_it, args.iterations):
+         path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
+         torch.save(small, path + ".tmp")
+         os.replace(path + ".tmp", path)
+-    if out_of_time:
+-        print(f"time budget of {args.max_hours} h reached at it {it + 1}", flush=True)
++    stop_flag = torch.tensor([1 if out_of_time else 0], device=dev, dtype=torch.int32)
++    if DIST:
++        torch.distributed.all_reduce(stop_flag, op=torch.distributed.ReduceOp.MAX)
++    if int(stop_flag.item()):
++        if RANK == 0:
++            print(f"time budget of {args.max_hours} h reached at it {it + 1}", flush=True)
+         break
+ if CKPT_POOL is not None:  # every background checkpoint written (a failed write raises here: non-zero exit)
+     ckpt_wait(drain=True)
+     CKPT_POOL.shutdown()
++if DIST:
++    torch.distributed.destroy_process_group()
