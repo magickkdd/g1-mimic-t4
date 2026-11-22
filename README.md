@@ -4,8 +4,9 @@
 
 ## 状态
 
-- 2026-11-22：双卡 DDP + fp16 冒烟通过（100 iterations，`exit_code=0`，0.072 GPU-h，2.4 GB/卡）
-- 下一步：40 段 LAFAN1、3500 iterations 正式训练
+- 2026-11-22：双卡 DDP + fp16 冒烟通过（100 iterations，0.072 GPU-h，2.4 GB/卡）
+- 2026-11-22：40 段 LAFAN1 baseline 完成（3500 iterations，`exit_code=0`，2.21 GPU-h，5.9 GB/卡，最终训练 `ep_ret=0.792`）
+- 下一步：用 `kaggle_eval_t4.ipynb` 出正式评测指标与视频；再跑 max 档
 - 仅仿真验证，未上真机
 
 ## 目录
@@ -17,7 +18,8 @@ scripts/         Kaggle 启动脚本、T4 补丁、备份工具
 third_party/     上游仓库（不提交）
 data/            动作数据（不提交）
 results/         日志与 checkpoint（不提交）
-kaggle_blinkmimic_t4_ddp.ipynb   可直接 Run All 的正式训练 Notebook
+kaggle_blinkmimic_t4_ddp.ipynb   可直接 Run All 的训练 Notebook
+kaggle_eval_t4.ipynb             训练后指标、轨迹与视频
 ```
 
 ## 环境
@@ -47,6 +49,13 @@ LAFAN1 G1 重定向，30 fps CSV。许可 CC BY-NC-ND 4.0，仅个人/非商业�
 ## 运行
 
 Kaggle 上传 `kaggle_blinkmimic_t4_ddp.ipynb`，添加 `HF_TOKEN` Secret，然后 Run All。
+
+训练完成后上传 `kaggle_eval_t4.ipynb`，同样 Run All，产出：
+
+- `eval_final.md` / `eval_final.json`：归一化回报、失败动作、身体位置/姿态、根漂移、关节误差、脚滑、接触一致率、穿地
+- `eval_traj.npz`：40 段动作的确定性 rollout
+- `eval_video.mp4`：走、跑、转身、舞蹈四段视频
+- 以上文件自动上传到 Hugging Face 私有仓库 `runs/run_<id>/eval/`
 
 命令行：
 
