@@ -3,6 +3,7 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -67,6 +68,15 @@ def main():
         raise ValueError("motion names are not unique; refusing to overwrite per-motion videos")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = args.out_dir / "manifest.json"
+    rows_by_name = {}
+    if manifest.exists():
+        try:
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+            rows_by_name = {row["motion"]: row for row in saved.get("videos", [])}
+        except (json.JSONDecodeError, KeyError, TypeError):
+            rows_by_name = {}
+
     rows = []
     for index, (name, frames) in enumerate(zip(names, clip_len)):
         steps = int(frames) - 1
@@ -76,6 +86,38 @@ def main():
         duration = steps / CONTROL_HZ
         output = args.out_dir / f"{index:02d}_{safe_name(name)}.mp4"
         log_path = args.out_dir / f"{index:02d}_{safe_name(name)}.log"
+        print(
+            f"[{index + 1:02d}/{clip_count}] start {name} "
+            f"expected={duration:.3f}s output={output.name}",
+            flush=True,
+        )
+
+        if output.is_file() and output.stat().st_size > 0:
+            try:
+                actual_duration = video_duration(output)
+            except (subprocess.CalledProcessError, ValueError):
+                actual_duration = -1.0
+            if 0 < actual_duration and abs(actual_duration - duration) <= 1.0 / args.fps + 0.02:
+                row = rows_by_name.get(name, {
+                    "index": index,
+                    "motion": name,
+                    "reference_frames": int(frames),
+                    "simulation_steps": steps,
+                    "expected_duration_seconds": duration,
+                    "video_duration_seconds": actual_duration,
+                    "video": output.name,
+                    "bytes": output.stat().st_size,
+                })
+                rows.append(row)
+                print(
+                    f"[{index + 1:02d}/{clip_count}] reused {name}: "
+                    f"{actual_duration:.3f}s",
+                    flush=True,
+                )
+                continue
+
+            output.unlink()
+
         command = [
             "uv",
             "--directory",
@@ -103,6 +145,7 @@ def main():
         if args.clean:
             command.append("--clean")
 
+        print(f"[{index + 1:02d}/{clip_count}] rendering {name}", flush=True)
         with log_path.open("w") as log:
             result = subprocess.run(command, cwd=args.render_py.parent.parent, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
@@ -128,13 +171,38 @@ def main():
                 "bytes": output.stat().st_size,
             }
         )
+        row = {
+            "index": index,
+            "motion": name,
+            "reference_frames": int(frames),
+            "simulation_steps": steps,
+            "expected_duration_seconds": duration,
+            "video_duration_seconds": actual_duration,
+            "video": output.name,
+            "bytes": output.stat().st_size,
+        }
+        rows.append(row)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "trajectory": str(args.traj),
+                    "control_hz": CONTROL_HZ,
+                    "video_fps": args.fps,
+                    "clip_count": clip_count,
+                    "completed_count": len(rows),
+                    "videos": rows,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         print(
-            f"[{index + 1:02d}/{clip_count}] {name}: "
+            f"[{index + 1:02d}/{clip_count}] done {name}: "
             f"{actual_duration:.3f}s, {output.stat().st_size / 1e6:.2f} MB",
             flush=True,
         )
 
-    manifest = args.out_dir / "manifest.json"
     manifest.write_text(
         json.dumps(
             {
@@ -142,6 +210,7 @@ def main():
                 "control_hz": CONTROL_HZ,
                 "video_fps": args.fps,
                 "clip_count": clip_count,
+                "completed_count": len(rows),
                 "videos": rows,
             },
             indent=2,
