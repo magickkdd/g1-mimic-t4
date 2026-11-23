@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -41,7 +42,7 @@ def main():
     parser.add_argument("traj", type=Path)
     parser.add_argument("render_py", type=Path)
     parser.add_argument("out_dir", type=Path)
-    parser.add_argument("--fps", type=int, default=25)
+    parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=360)
     parser.add_argument("--title", default="G1 Mimic T4")
@@ -147,10 +148,27 @@ def main():
 
         print(f"[{index + 1:02d}/{clip_count}] rendering {name}", flush=True)
         with log_path.open("w") as log:
-            result = subprocess.run(command, cwd=args.render_py.parent.parent, stdout=log, stderr=subprocess.STDOUT)
-        if result.returncode != 0 or not output.is_file() or output.stat().st_size == 0:
+            process = subprocess.Popen(
+                command,
+                cwd=args.render_py.parent.parent,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            last_heartbeat = time.monotonic()
+            while process.poll() is None:
+                time.sleep(5)
+                now = time.monotonic()
+                if now - last_heartbeat >= 30:
+                    print(
+                        f"[{index + 1:02d}/{clip_count}] alive {name}: "
+                        f"{now - last_heartbeat:.0f}s since last heartbeat",
+                        flush=True,
+                    )
+                    last_heartbeat = now
+            return_code = process.returncode
+        if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
             tail = log_path.read_text(errors="replace")[-4000:]
-            raise RuntimeError(f"render failed for {name} (exit={result.returncode}):\n{tail}")
+            raise RuntimeError(f"render failed for {name} (exit={return_code}):\n{tail}")
 
         actual_duration = video_duration(output)
         tolerance = 1.0 / args.fps + 0.02
