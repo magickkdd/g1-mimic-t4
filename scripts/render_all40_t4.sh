@@ -6,7 +6,7 @@ REPO_URL=${REPO_URL:-https://github.com/fuyichen0725/blinkmimic.git}
 COMMIT=${COMMIT:-d264658d6c9ce61fb52f9f0f8985a369f3ccc409}
 BASE_RESULTS=${BASE_RESULTS:-/kaggle/working/proj2-humanoid-mimic/results/blinkmimic_t4_ddp}
 HF_REPO_NAME=${HF_REPO_NAME:-proj2-blinkmimic-t4}
-VIDEO_FPS=${VIDEO_FPS:-10}
+VIDEO_FPS=${VIDEO_FPS:-2}
 VIDEO_WIDTH=${VIDEO_WIDTH:-640}
 VIDEO_HEIGHT=${VIDEO_HEIGHT:-360}
 CPU_COUNT=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')
@@ -78,13 +78,12 @@ import numpy as np
 for name, run_id in runs.items():
     root = base / f'run_{run_id}'
     video_dir = root / 'videos'
-    if video_dir.exists():
-        for old_video in video_dir.glob('*.mp4'):
-            old_video.unlink()
     video_dir.mkdir(parents=True, exist_ok=True)
+    for partial in video_dir.glob('*.partial.mp4'):
+        partial.unlink()
     log = root / 'eval_render_each_motion_stdout.txt'
     command = [
-        sys.executable, str(Path(os.environ['PROJECT_DIR']) / 'scripts' / 'render_each_motion.py'),
+        str(repo_dir / '.venv' / 'bin' / 'python'), str(Path(os.environ['PROJECT_DIR']) / 'scripts' / 'render_each_motion.py'),
         str(root / 'eval_traj.npz'), str(repo_dir / 'tools' / 'render.py'), str(video_dir),
         '--fps', os.environ['VIDEO_FPS'],
         '--width', os.environ['VIDEO_WIDTH'],
@@ -94,21 +93,19 @@ for name, run_id in runs.items():
     ]
     env = os.environ.copy()
     env['CUDA_VISIBLE_DEVICES'] = '0' if name == 'old_083958' else '1'
+    env['MUJOCO_EGL_DEVICE_ID'] = env['CUDA_VISIBLE_DEVICES']
     print('$', ' '.join(command))
     with log.open('w') as handle:
         result = subprocess.run(command, cwd=repo_dir.parent.parent, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
-    if result.returncode != 0:
-        raise SystemExit(f'{name} per-motion render failed; see {log}')
-
     videos = sorted(video_dir.glob('*.mp4'))
-    if len(videos) != 40 or not (video_dir / 'manifest.json').exists():
+    if result.returncode == 0 and (len(videos) != 40 or not (video_dir / 'manifest.json').exists()):
         raise SystemExit(f'{name}: expected 40 complete per-motion MP4s and manifest, found {len(videos)}')
     api.upload_folder(
         folder_path=str(video_dir),
         path_in_repo=f'runs/run_{run_id}/eval/videos',
         repo_id=hf_repo,
         repo_type='model',
-        commit_message=f'Upload complete per-motion videos for {run_id}',
+        commit_message=f'Upload completed per-motion videos for {run_id}',
     )
     api.upload_file(
         path_or_fileobj=str(log),
@@ -116,20 +113,9 @@ for name, run_id in runs.items():
         repo_id=hf_repo,
         repo_type='model',
     )
-    legacy_path = f'runs/run_{run_id}/eval/eval_video_all40.mp4'
-    try:
-        api.delete_file(
-            path_in_repo=legacy_path,
-            repo_id=hf_repo,
-            repo_type='model',
-            commit_message=f'Remove truncated aggregate video for {run_id}',
-        )
-        print(f'[hf] removed obsolete {legacy_path}')
-    except Exception as exc:
-        if '404' not in str(exc) and 'Entry not found' not in str(exc):
-            raise
-        print(f'[hf] obsolete aggregate not present: {legacy_path}')
     print(f'[hf] uploaded {name}/videos ({len(videos)} MP4s plus manifest)')
+    if result.returncode != 0:
+        raise SystemExit(f'{name} render failed after uploading completed videos; rerun to resume, see {log}')
     print(f'{name}: per_motion_videos={len(videos)}')
 
 print('40_separate_complete_motion_videos_render_upload=PASS')
